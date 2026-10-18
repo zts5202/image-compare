@@ -1,0 +1,2 @@
+-keep class com.zts.imagecompare.data.** { *; }
+-keep class com.google.mlkit.** { *; }
