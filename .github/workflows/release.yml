@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android SDK
+        run: |
+          set -euo pipefail
+          TOOLS_ZIP="$RUNNER_TEMP/cmdline-tools.zip"
+          curl -fsSL -o "$TOOLS_ZIP" https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          mkdir -p "$RUNNER_TEMP/android-sdk/cmdline-tools"
+          unzip -q "$TOOLS_ZIP" -d "$RUNNER_TEMP/android-sdk/cmdline-tools"
+          mv "$RUNNER_TEMP/android-sdk/cmdline-tools/cmdline-tools" "$RUNNER_TEMP/android-sdk/cmdline-tools/latest"
+          echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
+          yes | "$RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$RUNNER_TEMP/android-sdk/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Prepare signing
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SIGNING_KEYSTORE_BASE64}" ] && [ -n "${SIGNING_KEY_ALIAS}" ] && [ -n "${SIGNING_STORE_PASSWORD}" ] && [ -n "${SIGNING_KEY_PASSWORD}" ]; then
+            KEYSTORE="$RUNNER_TEMP/release.keystore"
+            echo "${SIGNING_KEYSTORE_BASE64}" | base64 -d > "$KEYSTORE"
+            echo "SIGNING_STORE_FILE=$KEYSTORE" >> "$GITHUB_ENV"
+            echo "Release keystore decoded."
+          else
+            echo "Signing secrets missing; assembleRelease will fall back to the debug signature."
+            mkdir -p "$HOME/.android"
+            if [ ! -f "$HOME/.android/debug.keystore" ]; then
+              keytool -genkeypair -v \
+                -keystore "$HOME/.android/debug.keystore" \
+                -storepass android \
+                -alias androiddebugkey \
+                -keypass android \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+
+      - name: Unit tests and release APK
+        env:
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: ./gradlew testDebugUnitTest assembleRelease --stacktrace
+
+      - name: Reject INTERNET permission
+        run: |
+          set -euo pipefail
+          mapfile -t MANIFESTS < <(find app/build/intermediates -path '*merged_manifest*' -name AndroidManifest.xml | sort)
+          if [ "${#MANIFESTS[@]}" -eq 0 ]; then
+            echo "Merged manifest was not produced."
+            exit 1
+          fi
+          failed=0
+          for manifest in "${MANIFESTS[@]}"; do
+            if grep -E 'uses-permission[^>]*android\.permission\.INTERNET' "$manifest"; then
+              echo "INTERNET permission is present in $manifest"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-compare-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk
