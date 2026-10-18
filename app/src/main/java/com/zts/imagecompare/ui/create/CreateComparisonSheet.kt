@@ -4,10 +4,14 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,9 +39,11 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -50,9 +56,15 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zts.imagecompare.Graph
+import com.zts.imagecompare.core.CropDecision
+import com.zts.imagecompare.core.CropSpec
 import com.zts.imagecompare.data.Category
 import com.zts.imagecompare.data.ComparisonRepository
+import com.zts.imagecompare.data.ImportImage
 import com.zts.imagecompare.image.ImageDecode
+import com.zts.imagecompare.ui.crop.CropEditorTarget
+import com.zts.imagecompare.ui.crop.CropSymbol
+import com.zts.imagecompare.ui.crop.FrameCropDialog
 import com.zts.imagecompare.ui.theme.Accent
 import com.zts.imagecompare.ui.theme.AccentPressed
 import com.zts.imagecompare.ui.theme.Background
@@ -68,7 +80,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
-data class StagedImage(val file: File, val thumb: ImageBitmap)
+data class StagedImage(
+    val file: File,
+    val thumb: ImageBitmap,
+    val width: Int,
+    val height: Int,
+    val cropFile: File? = null,
+    val crop: CropSpec? = null,
+)
 
 class CreateViewModel(private val repository: ComparisonRepository) : ViewModel() {
     var original by mutableStateOf<StagedImage?>(null)
@@ -77,6 +96,9 @@ class CreateViewModel(private val repository: ComparisonRepository) : ViewModel(
     var saving by mutableStateOf(false)
     var busy by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
+    var cropOpen by mutableStateOf(false)
+    var cropSaving by mutableStateOf(false)
+    var cropError by mutableStateOf<String?>(null)
     private var committed = false
 
     fun setOriginal(uri: Uri) {
@@ -85,7 +107,9 @@ class CreateViewModel(private val repository: ComparisonRepository) : ViewModel(
             error = null
             try {
                 val staged = stage(uri)
-                original?.let { repository.discardStaged(listOf(it.file)) }
+                original?.let { previous ->
+                    repository.discardStaged(listOfNotNull(previous.file, previous.cropFile))
+                }
                 original = staged
             } catch (t: Throwable) {
                 error = t.message ?: "无法读取原图"
@@ -111,8 +135,31 @@ class CreateViewModel(private val repository: ComparisonRepository) : ViewModel(
     }
 
     fun removeGenerated(file: File) {
+        val removed = generated.firstOrNull { it.file == file }
         generated = generated.filterNot { it.file == file }
-        repository.discardStaged(listOf(file))
+        repository.discardStaged(listOfNotNull(file, removed?.cropFile))
+    }
+
+    fun applyCrops(decisions: List<CropDecision>) {
+        if (cropSaving) return
+        viewModelScope.launch {
+            cropSaving = true
+            cropError = null
+            try {
+                for (decision in decisions) {
+                    when (decision) {
+                        is CropDecision.Unchanged -> Unit
+                        is CropDecision.Clear -> clearStagedCrop(decision.key)
+                        is CropDecision.Apply -> writeStagedCrop(decision.key, decision.spec)
+                    }
+                }
+                cropOpen = false
+            } catch (t: Throwable) {
+                cropError = t.message ?: "裁剪失败"
+            } finally {
+                cropSaving = false
+            }
+        }
     }
 
     fun save(onCreated: (Long) -> Unit) {
@@ -124,7 +171,11 @@ class CreateViewModel(private val repository: ComparisonRepository) : ViewModel(
             saving = true
             error = null
             try {
-                val id = repository.create(source.file, outputs.map { it.file }, chosen)
+                val id = repository.create(
+                    ImportImage(source.file, source.cropFile, source.crop),
+                    outputs.map { ImportImage(it.file, it.cropFile, it.crop) },
+                    chosen,
+                )
                 committed = true
                 original = null
                 generated = emptyList()
@@ -141,7 +192,8 @@ class CreateViewModel(private val repository: ComparisonRepository) : ViewModel(
 
     fun discard() {
         if (!committed) {
-            val files = listOfNotNull(original?.file) + generated.map { it.file }
+            val files = listOfNotNull(original?.file, original?.cropFile) +
+                generated.flatMap { listOfNotNull(it.file, it.cropFile) }
             repository.discardStaged(files)
         }
         original = null
@@ -159,7 +211,35 @@ class CreateViewModel(private val repository: ComparisonRepository) : ViewModel(
         val file = repository.stage(uri)
         val thumb = withContext(Dispatchers.IO) { ImageDecode.decode(file, 256) }
             ?: error("无法解码此图片")
-        return StagedImage(file, thumb.asImageBitmap())
+        val (width, height) = withContext(Dispatchers.IO) { ImageDecode.orientedBounds(file) }
+        return StagedImage(file, thumb.asImageBitmap(), width.coerceAtLeast(1), height.coerceAtLeast(1))
+    }
+
+    private suspend fun writeStagedCrop(key: String, spec: CropSpec) {
+        val current = staged(key) ?: return
+        val (cropFile, _) = repository.stageCrop(current.file, spec)
+        val thumb = withContext(Dispatchers.IO) { ImageDecode.decode(cropFile, 256) }?.asImageBitmap() ?: current.thumb
+        current.cropFile?.let { repository.discardStaged(listOf(it)) }
+        replace(key, current.copy(thumb = thumb, cropFile = cropFile, crop = spec))
+    }
+
+    private suspend fun clearStagedCrop(key: String) {
+        val current = staged(key) ?: return
+        current.cropFile?.let { repository.discardStaged(listOf(it)) }
+        val thumb = withContext(Dispatchers.IO) { ImageDecode.decode(current.file, 256) }?.asImageBitmap() ?: current.thumb
+        replace(key, current.copy(thumb = thumb, cropFile = null, crop = null))
+    }
+
+    private fun staged(key: String): StagedImage? {
+        return if (key == ComparisonRepository.ORIGINAL_KEY) original else generated.firstOrNull { it.file.absolutePath == key }
+    }
+
+    private fun replace(key: String, image: StagedImage) {
+        if (key == ComparisonRepository.ORIGINAL_KEY) {
+            original = image
+        } else {
+            generated = generated.map { if (it.file.absolutePath == key) image else it }
+        }
     }
 
     class Factory : ViewModelProvider.Factory {
@@ -189,7 +269,7 @@ fun CreateComparisonSheet(
     val ready = viewModel.original != null && viewModel.generated.isNotEmpty() && viewModel.category != null
     ModalBottomSheet(
         onDismissRequest = {
-            if (!viewModel.saving) {
+            if (!viewModel.saving && !viewModel.cropOpen) {
                 viewModel.discard()
                 onDismiss()
             }
@@ -234,6 +314,14 @@ fun CreateComparisonSheet(
                 }
                 SheetButton("选择一张或多张") {
                     pickGenerated.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }
+            }
+            if (viewModel.original != null && viewModel.generated.isNotEmpty()) {
+                Spacer(Modifier.height(16.dp))
+                val cropped = viewModel.original?.crop != null || viewModel.generated.any { it.crop != null }
+                CropStepButton(cropped = cropped, enabled = !viewModel.busy && !viewModel.saving) {
+                    viewModel.cropError = null
+                    viewModel.cropOpen = true
                 }
             }
             Spacer(Modifier.height(16.dp))
@@ -290,6 +378,73 @@ fun CreateComparisonSheet(
                 Text(label, color = if (ready) Color.Black else TextSecondary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             }
         }
+    }
+    val source = viewModel.original
+    if (viewModel.cropOpen && source != null && viewModel.generated.isNotEmpty()) {
+        val cropTargets = buildList {
+            add(
+                CropEditorTarget(
+                    key = ComparisonRepository.ORIGINAL_KEY,
+                    label = "原图",
+                    file = source.file,
+                    imageW = source.width,
+                    imageH = source.height,
+                    saved = source.crop,
+                ),
+            )
+            viewModel.generated.forEachIndexed { index, image ->
+                add(
+                    CropEditorTarget(
+                        key = image.file.absolutePath,
+                        label = if (viewModel.generated.size == 1) "生成图" else "生成 ${index + 1}",
+                        file = image.file,
+                        imageW = image.width,
+                        imageH = image.height,
+                        saved = image.crop,
+                    ),
+                )
+            }
+        }
+        FrameCropDialog(
+            targets = cropTargets,
+            startIndex = 1,
+            saving = viewModel.cropSaving,
+            error = viewModel.cropError,
+            onConfirm = viewModel::applyCrops,
+            onDismiss = {
+                viewModel.cropError = null
+                viewModel.cropOpen = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun CropStepButton(cropped: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) 0.97f else 1f,
+        animationSpec = tween(90),
+        label = "crop-step",
+    )
+    Row(
+        Modifier
+            .scale(scale)
+            .clip(CircleShape)
+            .background(if (cropped) Accent else Background)
+            .border(1.dp, Accent, CircleShape)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(CropSymbol, contentDescription = null, tint = if (cropped) Color.Black else Accent, modifier = Modifier.size(16.dp))
+        Text(
+            if (cropped) "已裁剪，可继续调整" else "裁剪（可选）",
+            color = if (cropped) Color.Black else Accent,
+            fontSize = 13.sp,
+        )
     }
 }
 
