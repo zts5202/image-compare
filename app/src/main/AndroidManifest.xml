@@ -26,5 +26,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- CropImageView is embedded in-app. Drop the library activity and its file provider. -->
+        <activity
+            android:name="com.canhub.cropper.CropImageActivity"
+            tools:node="remove" />
+        <provider
+            android:name="com.canhub.cropper.CropFileProvider"
+            android:authorities="${applicationId}.cropper.fileprovider"
+            tools:node="remove" />
     </application>
 </manifest>

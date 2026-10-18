@@ -15,8 +15,8 @@ android {
         applicationId = "com.zts.imagecompare"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
     }
 
     val releaseStore = System.getenv("SIGNING_STORE_FILE")?.takeIf { it.isNotBlank() }?.let { File(it) }
@@ -110,6 +110,9 @@ dependencies {
 
     // Bundled face model. Do not switch this to play-services-mlkit; that one downloads the model.
     implementation("com.google.mlkit:face-detection:16.1.7")
+
+    // CanHub Android-Image-Cropper 4.7.0 (Apache-2.0), published on Maven Central.
+    implementation("com.vanniktech:android-image-cropper:4.7.0")
 
     testImplementation("junit:junit:4.13.2")
 }

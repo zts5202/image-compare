@@ -78,7 +78,12 @@ import com.zts.imagecompare.core.Alignment as FaceAlignment
 import com.zts.imagecompare.core.Zoom
 import com.zts.imagecompare.core.ZoomMath
 import com.zts.imagecompare.core.formatBytes
+import com.zts.imagecompare.data.ComparisonRepository
 import com.zts.imagecompare.ui.ChevronPair
+import com.zts.imagecompare.ui.crop.CropEditorTarget
+import com.zts.imagecompare.ui.crop.CropSymbol
+import com.zts.imagecompare.ui.crop.FrameCropDialog
+import java.io.File
 import com.zts.imagecompare.ui.CrownIcon
 import com.zts.imagecompare.ui.SparkleIcon
 import com.zts.imagecompare.ui.TargetIcon
@@ -135,6 +140,7 @@ fun CompareScreen(
     var boxH by remember { mutableFloatStateOf(0f) }
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var showCrop by remember { mutableStateOf(false) }
 
     val modeState = rememberUpdatedState(mode)
     val splitState = rememberUpdatedState(split)
@@ -175,6 +181,47 @@ fun CompareScreen(
             anchor = position,
             slotW = slotW,
             slotH = boxH,
+        )
+    }
+
+    if (showCrop && ui.originalPath.isNotBlank() && ui.generated.isNotEmpty()) {
+        val cropTargets = buildList {
+            add(
+                CropEditorTarget(
+                    key = ComparisonRepository.ORIGINAL_KEY,
+                    label = "原图",
+                    file = File(ui.originalPath),
+                    imageW = ui.originalSourceWidth.coerceAtLeast(1),
+                    imageH = ui.originalSourceHeight.coerceAtLeast(1),
+                    saved = ui.originalCrop,
+                ),
+            )
+            ui.generated.forEachIndexed { index, item ->
+                add(
+                    CropEditorTarget(
+                        key = item.id.toString(),
+                        label = if (ui.generated.size == 1) "生成图" else "生成 ${index + 1}",
+                        file = File(item.sourcePath),
+                        imageW = item.sourceWidth.coerceAtLeast(1),
+                        imageH = item.sourceHeight.coerceAtLeast(1),
+                        saved = item.crop,
+                    ),
+                )
+            }
+        }
+        val start = (ui.generated.indexOfFirst { it.id == ui.selectedId } + 1).coerceAtLeast(1)
+        FrameCropDialog(
+            targets = cropTargets,
+            startIndex = start,
+            saving = ui.cropBusy,
+            error = ui.cropError,
+            onConfirm = { decisions ->
+                viewModel.commitCrops(decisions) { showCrop = false }
+            },
+            onDismiss = {
+                viewModel.clearCropError()
+                showCrop = false
+            },
         )
     }
 
@@ -363,6 +410,16 @@ fun CompareScreen(
                         busy = ui.alignBusy,
                         icon = { TargetIcon(it, Modifier.size(14.dp)) },
                         onClick = { viewModel.setAutoAlign(!ui.autoAlign) },
+                    )
+                    val selectedGenerated = ui.generated.firstOrNull { it.id == ui.selectedId }
+                    ToggleChip(
+                        label = "裁剪",
+                        on = ui.originalCrop != null || selectedGenerated?.crop != null,
+                        busy = false,
+                        icon = { tint ->
+                            Icon(CropSymbol, contentDescription = null, tint = tint, modifier = Modifier.size(14.dp))
+                        },
+                        onClick = { showCrop = true },
                     )
                 }
                 val activeLoupe = loupe

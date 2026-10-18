@@ -55,6 +55,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zts.imagecompare.data.Category
 import com.zts.imagecompare.data.ComparisonWithImages
+import com.zts.imagecompare.data.activeOriginalPath
+import com.zts.imagecompare.data.activePath
 import com.zts.imagecompare.ui.CrownIcon
 import com.zts.imagecompare.ui.components.FileImage
 import com.zts.imagecompare.ui.theme.Accent
@@ -284,7 +286,7 @@ private fun ComparisonCard(
         ) {
             Box(Modifier.weight(1f).fillMaxSize()) {
                 FileImage(
-                    path = item.comparison.originalPath,
+                    path = item.comparison.activeOriginalPath(),
                     maxEdge = 480,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)),
@@ -304,7 +306,7 @@ private fun ComparisonCard(
             Box(Modifier.weight(1f).fillMaxSize()) {
                 if (best != null) {
                     FileImage(
-                        path = best.path,
+                        path = best.activePath(),
                         maxEdge = 480,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)),

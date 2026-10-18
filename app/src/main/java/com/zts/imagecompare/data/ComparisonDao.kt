@@ -37,4 +37,100 @@ interface ComparisonDao {
 
     @Query("DELETE FROM comparisons")
     suspend fun deleteAll()
+
+    @Query(
+        """
+        UPDATE comparisons SET
+            originalCropPath = :path,
+            originalCropLeft = :left,
+            originalCropTop = :top,
+            originalCropRight = :right,
+            originalCropBottom = :bottom,
+            originalCropAspect = :aspect,
+            originalCropWidth = :width,
+            originalCropHeight = :height,
+            originalCropBytes = :bytes,
+            originalCropSharpness = :sharpness
+        WHERE id = :id
+        """,
+    )
+    suspend fun updateOriginalCrop(
+        id: Long,
+        path: String,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        aspect: String,
+        width: Int,
+        height: Int,
+        bytes: Long,
+        sharpness: Int,
+    )
+
+    @Query(
+        """
+        UPDATE comparisons SET
+            originalCropPath = NULL,
+            originalCropLeft = NULL,
+            originalCropTop = NULL,
+            originalCropRight = NULL,
+            originalCropBottom = NULL,
+            originalCropAspect = NULL,
+            originalCropWidth = NULL,
+            originalCropHeight = NULL,
+            originalCropBytes = NULL,
+            originalCropSharpness = NULL
+        WHERE id = :id
+        """,
+    )
+    suspend fun clearOriginalCrop(id: Long)
+
+    @Query(
+        """
+        UPDATE generated_images SET
+            cropPath = :path,
+            cropLeft = :left,
+            cropTop = :top,
+            cropRight = :right,
+            cropBottom = :bottom,
+            cropAspect = :aspect,
+            cropWidth = :width,
+            cropHeight = :height,
+            cropBytes = :bytes,
+            cropSharpness = :sharpness
+        WHERE id = :id
+        """,
+    )
+    suspend fun updateGeneratedCrop(
+        id: Long,
+        path: String,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        aspect: String,
+        width: Int,
+        height: Int,
+        bytes: Long,
+        sharpness: Int,
+    )
+
+    @Query(
+        """
+        UPDATE generated_images SET
+            cropPath = NULL,
+            cropLeft = NULL,
+            cropTop = NULL,
+            cropRight = NULL,
+            cropBottom = NULL,
+            cropAspect = NULL,
+            cropWidth = NULL,
+            cropHeight = NULL,
+            cropBytes = NULL,
+            cropSharpness = NULL
+        WHERE id = :id
+        """,
+    )
+    suspend fun clearGeneratedCrop(id: Long)
 }

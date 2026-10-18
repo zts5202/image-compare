@@ -12,10 +12,23 @@ import androidx.lifecycle.viewModelScope
 import com.zts.imagecompare.Graph
 import com.zts.imagecompare.core.AlignMath
 import com.zts.imagecompare.core.Alignment
+import com.zts.imagecompare.core.CropDecision
+import com.zts.imagecompare.core.CropSpec
 import com.zts.imagecompare.core.FaceBox
 import com.zts.imagecompare.data.ComparisonRepository
 import com.zts.imagecompare.data.ComparisonWithImages
 import com.zts.imagecompare.data.GeneratedImageEntity
+import com.zts.imagecompare.data.activeBytes
+import com.zts.imagecompare.data.activeHeight
+import com.zts.imagecompare.data.activeOriginalBytes
+import com.zts.imagecompare.data.activeOriginalHeight
+import com.zts.imagecompare.data.activeOriginalPath
+import com.zts.imagecompare.data.activeOriginalSharpness
+import com.zts.imagecompare.data.activeOriginalWidth
+import com.zts.imagecompare.data.activePath
+import com.zts.imagecompare.data.activeSharpness
+import com.zts.imagecompare.data.activeWidth
+import com.zts.imagecompare.data.cropSpec
 import com.zts.imagecompare.image.DiffRenderer
 import com.zts.imagecompare.image.FaceAligner
 import com.zts.imagecompare.image.ImageDecode
@@ -28,10 +41,14 @@ import java.io.File
 data class GeneratedThumb(
     val id: Long,
     val path: String,
+    val sourcePath: String,
+    val sourceWidth: Int,
+    val sourceHeight: Int,
     val width: Int,
     val height: Int,
     val bytes: Long,
     val sharpness: Int,
+    val crop: CropSpec? = null,
     val thumb: ImageBitmap? = null,
 )
 
@@ -40,10 +57,16 @@ data class CompareUiState(
     val missing: Boolean = false,
     val category: String = "",
     val favorite: Boolean = false,
+    val originalPath: String = "",
     val originalWidth: Int = 0,
     val originalHeight: Int = 0,
     val originalBytes: Long = 0,
     val originalSharpness: Int = 0,
+    val originalSourceWidth: Int = 0,
+    val originalSourceHeight: Int = 0,
+    val originalCrop: CropSpec? = null,
+    val cropBusy: Boolean = false,
+    val cropError: String? = null,
     val generated: List<GeneratedThumb> = emptyList(),
     val selectedId: Long? = null,
     val bestId: Long? = null,
@@ -128,6 +151,24 @@ class CompareViewModel(
         viewModelScope.launch { repository.setBest(comparisonId, id) }
     }
 
+    fun commitCrops(decisions: List<CropDecision>, onDone: () -> Unit) {
+        if (ui.cropBusy) return
+        viewModelScope.launch {
+            ui = ui.copy(cropBusy = true, cropError = null)
+            try {
+                repository.commitCrops(comparisonId, decisions)
+                ui = ui.copy(cropBusy = false)
+                onDone()
+            } catch (error: Throwable) {
+                ui = ui.copy(cropBusy = false, cropError = error.message ?: "裁剪失败")
+            }
+        }
+    }
+
+    fun clearCropError() {
+        ui = ui.copy(cropError = null)
+    }
+
     fun delete(onDeleted: () -> Unit) {
         viewModelScope.launch {
             repository.delete(comparisonId)
@@ -160,7 +201,7 @@ class CompareViewModel(
 
     private suspend fun apply(item: ComparisonWithImages) {
         val images = item.orderedImages
-        val key = item.comparison.originalPath + "|" + images.joinToString { it.path }
+        val key = item.comparison.activeOriginalPath() + "|" + images.joinToString { it.activePath() }
         if (key == loadedKey && ui.originalImage != null) {
             ui = ui.copy(
                 favorite = item.comparison.favorite,
@@ -174,16 +215,18 @@ class CompareViewModel(
         loadedKey = key
         ui = ui.copy(loading = true, missing = false, category = item.comparison.category)
         val original = withContext(Dispatchers.IO) {
-            ImageDecode.decode(File(item.comparison.originalPath), DISPLAY_EDGE)
+            ImageDecode.decode(File(item.comparison.activeOriginalPath()), DISPLAY_EDGE)
         }
         val thumbs = HashMap<Long, ImageBitmap?>()
         for (image in images) {
-            val thumb = withContext(Dispatchers.IO) { ImageDecode.decode(File(image.path), 256) }
+            val thumb = withContext(Dispatchers.IO) { ImageDecode.decode(File(image.activePath()), 256) }
             thumbs[image.id] = thumb?.asImageBitmap()
         }
-        val selected = images.firstOrNull { it.id == item.comparison.bestGeneratedId } ?: images.firstOrNull()
+        val selected = images.firstOrNull { it.id == ui.selectedId }
+            ?: images.firstOrNull { it.id == item.comparison.bestGeneratedId }
+            ?: images.firstOrNull()
         val selectedBmp = selected?.let { entity ->
-            withContext(Dispatchers.IO) { ImageDecode.decode(File(entity.path), DISPLAY_EDGE) }
+            withContext(Dispatchers.IO) { ImageDecode.decode(File(entity.activePath()), DISPLAY_EDGE) }
         }
         originalBitmap = original
         selectedBitmap = selectedBmp
@@ -194,10 +237,14 @@ class CompareViewModel(
         ui = ui.copy(
             loading = false,
             favorite = item.comparison.favorite,
-            originalWidth = item.comparison.originalWidth,
-            originalHeight = item.comparison.originalHeight,
-            originalBytes = item.comparison.originalBytes,
-            originalSharpness = item.comparison.originalSharpness,
+            originalPath = item.comparison.originalPath,
+            originalWidth = item.comparison.activeOriginalWidth(),
+            originalHeight = item.comparison.activeOriginalHeight(),
+            originalBytes = item.comparison.activeOriginalBytes(),
+            originalSharpness = item.comparison.activeOriginalSharpness(),
+            originalSourceWidth = item.comparison.originalWidth,
+            originalSourceHeight = item.comparison.originalHeight,
+            originalCrop = item.comparison.cropSpec(),
             generated = images.map { it.toThumb(thumbs[it.id]) },
             selectedId = selected?.id,
             bestId = item.comparison.bestGeneratedId,
@@ -289,11 +336,15 @@ class CompareViewModel(
 
     private fun GeneratedImageEntity.toThumb(thumb: ImageBitmap?) = GeneratedThumb(
         id = id,
-        path = path,
-        width = width,
-        height = height,
-        bytes = bytes,
-        sharpness = sharpness,
+        path = activePath(),
+        sourcePath = path,
+        sourceWidth = width,
+        sourceHeight = height,
+        width = activeWidth(),
+        height = activeHeight(),
+        bytes = activeBytes(),
+        sharpness = activeSharpness(),
+        crop = cropSpec(),
         thumb = thumb,
     )
 
